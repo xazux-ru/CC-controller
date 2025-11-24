@@ -3,6 +3,7 @@
 #define HOVER_SERIAL_BAUD   115200      // Baud rate for HoverSerial (Serial1)
 #define START_FRAME         0xABCD      // Start frame definition
 #define TIME_SEND           100         // [ms] Sending time interval
+#define FEEDBACK_INTERVAL   20000       // [ms] Feedback sending interval (20 seconds)
 
 // Actuator directions
 #define STOP 0
@@ -10,13 +11,9 @@
 #define DOWN 2
 
 // DEBUG_LEVEL
-// -1 = no debug
-// 0  = system information
-// 1  = all info (received command from APP, all received values from front hoverboard)
+// 0  = no debug
+// 1  = debug enabled
 #define DEBUG_LEVEL 0
-#if (DEBUG_LEVEL != -1)
-  #define SERIAL_BAUD 115200  // Baud rate for USB debug
-#endif
 
 // Global variables
 uint8_t idx = 0;
@@ -56,10 +53,14 @@ int liftState = 0;
 bool unlockMotor = 0;
 bool motor_running = 0;
 
+// Timer variables for feedback
+unsigned long lastFeedbackTime = 0;
+bool newDataAvailable = false;
+
 // ########################## SETUP ##########################
 void setup() 
 {
-  if (DEBUG_LEVEL != -1) Serial.begin(SERIAL_BAUD);
+  if (DEBUG_LEVEL == 1) Serial.begin(115200);
   Serial1.begin(HOVER_SERIAL_BAUD, SERIAL_8N1); // Initialize Serial1 for hoverboard
   Serial2.begin(9600);    // Serial to communicate with HM-10 module
 
@@ -111,13 +112,8 @@ void Receive()
 
         if (NewFeedback.start == START_FRAME && checksum == NewFeedback.checksum) {
             memcpy(&Feedback, &NewFeedback, sizeof(SerialFeedback));
-            
-            switch (DEBUG_LEVEL) {
-              case 0:
-                Serial.print(Feedback.batVoltage);
-                Serial.print("\t");
-                Serial.println((Feedback.speedL_meas + Feedback.speedR_meas)/2);
-              case 1:
+            newDataAvailable = true; // Mark that new data is available
+            if (DEBUG_LEVEL == 1) {
                 Serial.print(NewFeedback.start);
                 Serial.print("\t");
                 Serial.print(NewFeedback.cmd1);
@@ -141,6 +137,17 @@ void Receive()
     incomingBytePrev = incomingByte;
 }
 
+// ########################## SEND FEEDBACK ##########################
+void SendFeedback()
+{
+    if (newDataAvailable) {
+        Serial2.print(Feedback.batVoltage/43.1);
+        Serial2.print("\t");
+        Serial2.println((Feedback.speedL_meas - Feedback.speedR_meas)/2*0.05);
+        newDataAvailable = false; // Reset flag after sending
+    }
+}
+
 void controlMotors(int leftSpeed, int rightSpeed) {
   int speed = (leftSpeed + rightSpeed) / 2;
   int steer = rightSpeed - leftSpeed;
@@ -153,7 +160,7 @@ void runLift(){
     lastTime = millis();
   } else {
       currentTime = millis();
-      if (currentTime - lastTime >= 2000) unlockMotor = 0;
+      if (currentTime - lastTime >= 2000) unlockMotor= 0;
     }
 
   if (liftState == STOP){
@@ -197,10 +204,11 @@ void loop(void)
   CurrSens = analogRead(PA0);
   fil += (CurrSens - fil) >> 4;
   motor_running = (fil < 1540);
+  
   if (Serial2.available() > 0) {
     String input = Serial2.readStringUntil('\n');
     input.trim();
-    
+    if (DEBUG_LEVEL == 1) Serial.println(input);
     int left, right, b;
     
     int result = sscanf(input.c_str(), "%d:%d:%d", &left, &right, &b);
@@ -221,6 +229,12 @@ void loop(void)
     } else {
       Serial2.println("Error: Invalid format. Use: left:right:b");
     }
+  }
+
+  // Check if it's time to send feedback (every 20 seconds)
+  if (timeNow - lastFeedbackTime >= FEEDBACK_INTERVAL) {
+    SendFeedback();
+    lastFeedbackTime = timeNow;
   }
 
   if (iTimeSend > timeNow) return;
